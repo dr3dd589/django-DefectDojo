@@ -348,5 +348,13 @@
     "model": "dojo.test_type",
     "pk": 57
 
+	},
+	{
+		"fields": {
+      "name": "Whitesource Scan"
+    },
+    "model": "dojo.test_type",
+    "pk": 58
+
 	}
 ]
