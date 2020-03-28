@@ -1,24 +1,14 @@
 {% extends "base.html" %}
+{% load get_banner %}
 {% block content %}
     <h3>Login</h3>
-    <hr/>
-    {% if form.errors and not form.non_field_errors and not form.this_is_the_login_form.errors %}
-        <div class="alert alert-danger" role="alert">
-            {% if form.errors.items|length == 1 %}Please correct the error below.{% else %}Please correct the errors
-                below.{% endif %}
-        </div>
-    {% endif %}
-
-    {% if form.non_field_errors or form.this_is_the_login_form.errors %}
-        {% for error in form.non_field_errors|add:form.this_is_the_login_form.errors %}
-            <p class="errornote">
-                {{ error }}
-            </p>
-        {% endfor %}
-    {% endif %}
-
     <form class="form-horizontal" method="POST"> {% csrf_token %}
         <fieldset class="col-md-offset-3 col-md-6">
+            {% if "banner_enable"|get_banner %}
+                <div class="well">
+                {{ "banner_message"|get_banner }}
+                </div>
+            {% endif %}
             {% include "dojo/form_fields.html" with form=form %}
             <!-- Button -->
             <div class="form-group">
@@ -26,29 +16,42 @@
                     <i class="fa fa-eye"></i>
                     <span><b>Show Password</b></span>
                 </div>
+                {% if GOOGLE_ENABLED is False and OKTA_ENABLED is False and AZUREAD_TENANT_OAUTH2_ENABLED is False %}
+                    <div class="col-sm-offset-1 col-sm-1">
+                        <button class="btn btn-success">Login</button>
+                    </div>
+                {% endif %}
             </div>
             <div class="form-group">
+                {% if GOOGLE_ENABLED or OKTA_ENABLED or AZUREAD_TENANT_OAUTH2_ENABLED is True %}
                     <div class="col-sm-offset-1 col-sm-1">
                             <button class="btn btn-success">Login</button>
                     </div>
-                <div class="col-sm-offset-1 col-sm-3">
-                    <button class="btn btn-success" type="button">
-                        {% if GOOGLE_ENABLED == True %}
+                {% endif %}
+                {% if GOOGLE_ENABLED is True %}
+                    <div class="col-sm-offset-1 col-sm-2">
+                        <button class="btn btn-success" type="button">
                             <a href="{% url 'social:begin' 'google-oauth2' %}?next={{ request.GET.next }}" style="color: rgb(255,255,255)">Login with Google</a>
-                        {% else %}
-                            <a href="https://defectdojo.readthedocs.io/en/latest/social-authentication.html#google" style="color: rgb(255,255,255)">Login with Google</a>
-                        {% endif %}
-                    </button>
-                </div>
-                <div class="col-sm-offset-1 col-sm-1">
-                    <button class="btn btn-success" type="button">
-                        {% if OKTA_ENABLED == True %}
+                        </button>
+                    </div>
+                {% endif %}
+
+                {% if OKTA_ENABLED is True %}
+                    <div class="col-sm-offset-1 col-sm-2">
+                        <button class="btn btn-success" type="button">
                             <a href="{% url 'social:begin' 'okta-oauth2' %}?next={{ request.GET.next }}" style="color: rgb(255,255,255)">Login with OKTA</a>
-                        {% else %}
-                            <a href="https://defectdojo.readthedocs.io/en/latest/social-authentication.html#okta" style="color: rgb(255,255,255)">Login with OKTA</a>
-                        {% endif %}
-                    </button>
-                </div>
+                        </button>
+                    </div>
+                {% endif %}
+
+                {% if AZUREAD_TENANT_OAUTH2_ENABLED is True %}
+                    <div class="col-sm-offset-1 col-sm-2">
+                        <button class="btn btn-success" type="button">
+                            <a href="{% url 'social:begin' 'azuread-tenant-oauth2' %}?next={{ request.GET.next }}" style="color: rgb(255,255,255)">Login with Azure AD</a>
+                        </button>
+                    </div>
+                {% endif %}
+
             </div>
         </fieldset>
     </form>

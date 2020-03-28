@@ -1,13 +1,13 @@
 # Sorry for the lazyness but I just update the column name fields
 # Didn't change the class names, only the main one..
 
-import StringIO
+import io
 import csv
 import hashlib
 from dojo.models import Finding, Endpoint
 from dateutil.parser import parse
 import re
-from urlparse import urlparse
+from urllib.parse import urlparse
 import socket
 
 class ColumnMappingStrategy(object):
@@ -310,10 +310,11 @@ class OpenVASUploadCsvParser(object):
             self.items = ()
             return
 
-        content = filename.read()
+        content = open(filename.temporary_file_path(), 'rb')
+        reportCSV = io.TextIOWrapper(content, encoding='utf-8 ', errors='replace')
+        reader = csv.reader(reportCSV, delimiter=',', quotechar='"')
 
         row_number = 0
-        reader = csv.reader(StringIO.StringIO(content), delimiter=',', quotechar='"')
         for row in reader:
             finding = Finding(test=test)
 
@@ -335,11 +336,11 @@ class OpenVASUploadCsvParser(object):
                 if finding.description is None:
                     finding.description = ""
 
-                key = hashlib.md5(finding.url + '|' + finding.severity + '|' + finding.title + '|' + finding.description).hexdigest()
+                key = hashlib.md5((finding.url + '|' + finding.severity + '|' + finding.title + '|' + finding.description).encode('utf-8')).hexdigest()
 
                 if key not in self.dupes:
                     self.dupes[key] = finding
 
             row_number += 1
 
-        self.items = self.dupes.values()
+        self.items = list(self.dupes.values())

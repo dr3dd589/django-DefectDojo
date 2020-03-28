@@ -18,6 +18,22 @@ Please use [these test scripts](./tests) to test your changes. These are the exa
 
 For changes that require additional settings, settings.dist.py is the file you want to change. Settings.py is created by setup.bash from settings.dist.py
 
+## Python3 version
+For compatibility reasons, the code in dev branch should be python3.5 compliant.
+
+## Logging
+Logging is configured in `settings.dist.py`.
+
+Specific logger can be added. For example to activate logs related to the deduplication, change the level from DEBUG to INFO in:
+
+```
+          'dojo.specific-loggers.deduplication': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': False,
+        }
+```
+
 ## Submitting Pull Requests
 
 The following are things to consider before submitting a pull request to
@@ -33,9 +49,14 @@ DefectDojo.
 
 0. All submitted code should conform to [__PEP8 standards__][pep8].
 
-0. Pull requests should be submitted to the 'master' branch.
+0. See [flake8 built-in commit hooks] on how to easily check for for pep8 with flake8 before comitting.
+
+0. Pull requests should be submitted to the 'dev' branch.
+
+0. In dev branch, the code should be python 3.5 compliant.
 
 [dojo_settings]: /dojo/settings/settings.dist.py "DefectDojo settings file"
 [setup_py]: /setup.py "Python setup script"
 [setup_bash]: /setup.bash "Bash setup script"
 [pep8]: https://www.python.org/dev/peps/pep-0008/ "PEP8"
+[flake8 built-in commit hooks]: https://flake8.pycqa.org/en/latest/user/using-hooks.html#built-in-hook-integration

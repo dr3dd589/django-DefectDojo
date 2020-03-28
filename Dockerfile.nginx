@@ -3,7 +3,7 @@
 # The code for the build image should be idendical with the code in
 # Dockerfile.django to use the caching mechanism of Docker.
 
-FROM python:2 as build
+FROM python:3.5.9-buster@sha256:1baef6be00b82fbd77f1b60ab227a1dbede6f23825ce1b7f1e9c6f7d1469a45c as build
 WORKDIR /app
 RUN \
   apt-get -y update && \
@@ -12,31 +12,38 @@ RUN \
     default-mysql-client \
     postgresql-client \
     xmlsec1 \
+    git \
     && \
   apt-get clean && \
   rm -rf /var/lib/apt/lists && \
   true
 COPY requirements.txt ./
-RUN pip wheel --wheel-dir=/tmp/wheels -r ./requirements.txt
+RUN pip3 wheel --wheel-dir=/tmp/wheels -r ./requirements.txt
 
 FROM build AS collectstatic
 
 USER root
+ENV \
+  # This will point yarn to whatever version of node you decide to use
+  # due to the use of nodejs instead of node name in some distros
+  node="nodejs"
 RUN \
   apt-get -y update && \
   apt-get -y install apt-transport-https ca-certificates && \
   curl -sSL https://deb.nodesource.com/gpgkey/nodesource.gpg.key | apt-key add - && \
-  echo "deb https://deb.nodesource.com/node_11.x stretch main" | tee /etc/apt/sources.list.d/nodesource.list && \
+  curl -sL https://deb.nodesource.com/setup_12.x | bash - && \
   curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - && \
-  echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list && \
+  echo "deb https://nightly.yarnpkg.com/debian/ nightly main" | tee /etc/apt/sources.list.d/yarn.list && \
   apt-get -y update && \
   apt-get -y install nodejs && \
+  echo "$(node --version)" && \
   apt-get -y install --no-install-recommends yarn && \
+  echo "$(yarn --version)" && \
   apt-get clean && \
   rm -rf /var/lib/apt/lists && \
   true
 
-RUN pip install \
+RUN pip3 install \
 	--no-cache-dir \
 	--no-index \
   --find-links=/tmp/wheels \
@@ -51,20 +58,22 @@ RUN \
   cd components && \
   yarn && \
   cd .. && \
-  python manage.py collectstatic && \
+  python3 manage.py collectstatic --noinput && \
   true
 
-FROM nginx
+FROM nginx:1.17.7@sha256:89a42c3ba15f09a3fbe39856bddacdf9e94cd03df7403cad4fc105088e268fc9
 COPY --from=collectstatic /app/static/ /usr/share/nginx/html/static/
 COPY wsgi_params nginx/nginx.conf /etc/nginx/
-COPY docker/entrypoint-nginx.sh /
+COPY docker/entrypoint-nginx.sh nginx/*.cer nginx/*.key /
 RUN \
   chmod -R g=u /var/cache/nginx && \
   chmod -R g=u /var/run && \
+  if [ -f /*.key -o -f /*.cer ]; then chown 1001 /*.key /*.cer; fi && \
   true
 ENV \
   DD_UWSGI_PASS="uwsgi_server" \
   DD_UWSGI_HOST="uwsgi" \
   DD_UWSGI_PORT="3031"
 USER 1001
+EXPOSE 8080
 ENTRYPOINT ["/entrypoint-nginx.sh"]

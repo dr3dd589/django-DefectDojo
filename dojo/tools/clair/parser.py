@@ -15,7 +15,11 @@ class ClairParser(object):
 
     def parse_json(self, json_output):
         try:
-            tree = json.load(json_output)
+            data = json_output.read()
+            try:
+                tree = json.loads(str(data, 'utf-8'))
+            except:
+                tree = json.loads(data)
             subtree = tree.get('vulnerabilities')
         except:
             raise Exception("Invalid format")
@@ -30,7 +34,7 @@ class ClairParser(object):
             unique_key = str(node['vulnerability']) + str(node['featurename'])
             items[unique_key] = item
 
-        return items.values()
+        return list(items.values())
 
 
 def get_item(item_node, test):
@@ -50,6 +54,7 @@ def get_item(item_node, test):
                       str(item_node['vulnerability']),
                       mitigation=item_node['fixedby'],
                       references=item_node['link'],
+                      cve=item_node['vulnerability'],
                       active=False,
                       verified=False,
                       false_p=False,

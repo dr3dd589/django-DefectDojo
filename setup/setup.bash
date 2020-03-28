@@ -15,8 +15,8 @@
 #
 
 # Set the python version for the installer
-PY="python"
-PIP="pip"
+PY="python3"
+PIP="pip3"
 
 # Make sure setup.bash is run from the same directory it is located in
 cd ${0%/*}  # same as `cd "$(dirname "$0")"` without relying on dirname
@@ -110,7 +110,6 @@ echo "        SESSION_COOKIE_SECURE = True"
 echo "        CSRF_COOKIE_SECURE = True"
 echo "        SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')"
 echo "        SECURE_SSL_REDIRECT = True"
-echo "        SECURE_BROWSER_XSS_FILTER = True"
 echo "        django.middleware.security.SecurityMiddleware"
 echo
 echo "When you're ready to start the DefectDojo server, type in this directory:"

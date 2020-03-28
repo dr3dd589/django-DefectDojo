@@ -10,13 +10,18 @@ __status__ = "Development"
 TAG_RE = re.compile(r'<[^>]+>')
 
 
-def cleantags(text):
-    return TAG_RE.sub('', text)
+def cleantags(text=''):
+    prepared_text = text if text else ''
+    return TAG_RE.sub('', prepared_text)
 
 
 class NetsparkerParser(object):
     def __init__(self, filename, test):
-        data = json.load(filename)
+        tree = filename.read()
+        try:
+            data = json.loads(str(tree, 'utf-8'))
+        except:
+            data = json.loads(tree)
         dupes = dict()
 
         for item in data["Vulnerabilities"]:
@@ -32,7 +37,7 @@ class NetsparkerParser(object):
 
             title = item["Name"]
             findingdetail = cleantags(item["Description"])
-            cwe = item["Classification"]["Cwe"]
+            cwe = item["Classification"]["Cwe"] if "Cwe" in item["Classification"] else None
             sev = item["Severity"]
             if sev not in ['Info', 'Low', 'Medium', 'High', 'Critical']:
                 sev = 'Info'
@@ -63,4 +68,4 @@ class NetsparkerParser(object):
                 dupes[dupe_key] = find
                 findingdetail = ''
 
-        self.items = dupes.values()
+        self.items = list(dupes.values())

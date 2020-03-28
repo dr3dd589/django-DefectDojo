@@ -4,8 +4,9 @@ import binascii
 import os
 import hashlib
 import json
-import StringIO
-from Crypto.Cipher import AES
+import io
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
 from calendar import monthrange
 from datetime import date, datetime
 from math import pi, sqrt
@@ -16,13 +17,15 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.core.mail import EmailMessage
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
-from django.core.urlresolvers import get_resolver, reverse
+from django.urls import get_resolver, reverse
 from django.db.models import Q, Sum, Case, When, IntegerField, Value, Count
 from django.template.defaultfilters import pluralize
 from django.template.loader import render_to_string
 from django.utils import timezone
 from jira import JIRA
 from jira.exceptions import JIRAError
+from django.dispatch import receiver
+from dojo.signals import dedupe_signal
 
 from dojo.models import Finding, Engagement, Finding_Template, Product, JIRA_PKey, JIRA_Issue, \
     Dojo_User, User, Alerts, System_Settings, Notifications, UserContactInfo, Endpoint, Benchmark_Type, \
@@ -72,13 +75,41 @@ def sync_false_history(new_finding, *args, **kwargs):
         super(Finding, new_finding).save(*args, **kwargs)
 
 
+# true if both findings are on an engagement that have a different "deduplication on engagement" configuration
 def is_deduplication_on_engagement_mismatch(new_finding, to_duplicate_finding):
     return not new_finding.test.engagement.deduplication_on_engagement and to_duplicate_finding.test.engagement.deduplication_on_engagement
 
 
-def sync_dedupe(new_finding, *args, **kwargs):
-    deduplicationLogger.debug('sync_dedupe for: ' + str(new_finding.id) +
-                 ":" + str(new_finding.title))
+@receiver(dedupe_signal, sender=Finding)
+def sync_dedupe(sender, *args, **kwargs):
+    system_settings = System_Settings.objects.get()
+    if system_settings.enable_deduplication:
+        new_finding = kwargs['new_finding']
+        deduplicationLogger.debug('sync_dedupe for: ' + str(new_finding.id) +
+                    ":" + str(new_finding.title))
+        if hasattr(settings, 'DEDUPLICATION_ALGORITHM_PER_PARSER'):
+            scan_type = new_finding.test.test_type.name
+            deduplicationLogger.debug('scan_type for this finding is :' + scan_type)
+            # Default algorithm
+            deduplicationAlgorithm = settings.DEDUPE_ALGO_LEGACY
+            # Check for an override for this scan_type in the deduplication configuration
+            if (scan_type in settings.DEDUPLICATION_ALGORITHM_PER_PARSER):
+                deduplicationAlgorithm = settings.DEDUPLICATION_ALGORITHM_PER_PARSER[scan_type]
+            deduplicationLogger.debug('deduplication algorithm: ' + deduplicationAlgorithm)
+            if(deduplicationAlgorithm == settings.DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL):
+                deduplicate_unique_id_from_tool(new_finding)
+            elif(deduplicationAlgorithm == settings.DEDUPE_ALGO_HASH_CODE):
+                deduplicate_hash_code(new_finding)
+            elif(deduplicationAlgorithm == settings.DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL_OR_HASH_CODE):
+                deduplicate_uid_or_hash_code(new_finding)
+            else:
+                deduplicate_legacy(new_finding)
+        else:
+            deduplicationLogger.debug("no configuration per parser found; using legacy algorithm")
+            deduplicate_legacy(new_finding)
+
+
+def deduplicate_legacy(new_finding):
     # ---------------------------------------------------------
     # 1) Collects all the findings that have the same:
     #      (title  and static_finding and dynamic_finding)
@@ -89,43 +120,25 @@ def sync_dedupe(new_finding, *args, **kwargs):
     if new_finding.test.engagement.deduplication_on_engagement:
         eng_findings_cwe = Finding.objects.filter(
             test__engagement=new_finding.test.engagement,
-            cwe=new_finding.cwe,
-            static_finding=new_finding.static_finding,
-            dynamic_finding=new_finding.dynamic_finding
-                                                  ).exclude(id=new_finding.id
-                                                            ).exclude(cwe=0
-                                                                      ).exclude(duplicate=True)
+            cwe=new_finding.cwe).exclude(id=new_finding.id).exclude(cwe=0).exclude(duplicate=True)
         eng_findings_title = Finding.objects.filter(
             test__engagement=new_finding.test.engagement,
-            title=new_finding.title,
-            static_finding=new_finding.static_finding,
-            dynamic_finding=new_finding.dynamic_finding
-                                                   ).exclude(id=new_finding.id
-                                                             ).exclude(duplicate=True)
+            title=new_finding.title).exclude(id=new_finding.id).exclude(duplicate=True)
     else:
         eng_findings_cwe = Finding.objects.filter(
             test__engagement__product=new_finding.test.engagement.product,
-            cwe=new_finding.cwe,
-            static_finding=new_finding.static_finding,
-            dynamic_finding=new_finding.dynamic_finding
-                                                  ).exclude(id=new_finding.id
-                                                            ).exclude(cwe=0
-                                                                      ).exclude(duplicate=True)
+            cwe=new_finding.cwe).exclude(id=new_finding.id).exclude(cwe=0).exclude(duplicate=True)
         eng_findings_title = Finding.objects.filter(
             test__engagement__product=new_finding.test.engagement.product,
-            title=new_finding.title,
-            static_finding=new_finding.static_finding,
-            dynamic_finding=new_finding.dynamic_finding
-                                                    ).exclude(id=new_finding.id
-                                                              ).exclude(duplicate=True)
+            title=new_finding.title).exclude(id=new_finding.id).exclude(duplicate=True)
 
     total_findings = eng_findings_cwe | eng_findings_title
     deduplicationLogger.debug("Found " +
         str(len(eng_findings_cwe)) + " findings with same cwe, " +
         str(len(eng_findings_title)) + " findings with same title: " +
         str(len(total_findings)) + " findings with either same title or same cwe")
-    # total_findings = total_findings.order_by('date')
 
+    # total_findings = total_findings.order_by('date')
     for find in total_findings:
         flag_endpoints = False
         flag_line_path = False
@@ -140,12 +153,12 @@ def sync_dedupe(new_finding, *args, **kwargs):
         #    (if new finding is not static, do not deduplicate)
         # ---------------------------------------------------------
         if find.endpoints.count() != 0 and new_finding.endpoints.count() != 0:
-            list1 = new_finding.endpoints.all()
-            list2 = find.endpoints.all()
+            list1 = [e.host_with_port for e in new_finding.endpoints.all()]
+            list2 = [e.host_with_port for e in find.endpoints.all()]
             if all(x in list1 for x in list2):
                 flag_endpoints = True
         elif new_finding.static_finding and len(new_finding.file_path) > 0:
-            if(str(find.line) == new_finding.line and find.file_path == new_finding.file_path):
+            if str(find.line) == str(new_finding.line) and find.file_path == new_finding.file_path:
                 flag_line_path = True
             else:
                 deduplicationLogger.debug("no endpoints on one of the findings and file_path doesn't match")
@@ -162,14 +175,104 @@ def sync_dedupe(new_finding, *args, **kwargs):
         #    and (endpoints or (line and file_path)
         # ---------------------------------------------------------
         if ((flag_endpoints or flag_line_path) and flag_hash):
-            deduplicationLogger.debug('New finding ' + str(new_finding.id) + ' is a duplicate of existing finding ' + str(find.id))
-            new_finding.duplicate = True
-            new_finding.active = False
-            new_finding.verified = False
-            new_finding.duplicate_finding = find
-            find.duplicate_list.add(new_finding)
-            find.found_by.add(new_finding.test.test_type)
-            super(Finding, new_finding).save(*args, **kwargs)
+            set_duplicate(new_finding, find)
+            super(Finding, new_finding).save()
+            break
+
+
+def deduplicate_unique_id_from_tool(new_finding):
+    if new_finding.test.engagement.deduplication_on_engagement:
+        existing_findings = Finding.objects.filter(
+            test__engagement=new_finding.test.engagement,
+            unique_id_from_tool=new_finding.unique_id_from_tool).exclude(
+                id=new_finding.id).exclude(
+                    unique_id_from_tool=None).exclude(
+                        duplicate=True)
+    else:
+        existing_findings = Finding.objects.filter(
+            test__engagement__product=new_finding.test.engagement.product,
+            # the unique_id_from_tool is unique for a given tool: do not compare with other tools
+            test__test_type=new_finding.test.test_type,
+            unique_id_from_tool=new_finding.unique_id_from_tool).exclude(
+                id=new_finding.id).exclude(
+                    unique_id_from_tool=None).exclude(
+                        duplicate=True)
+    deduplicationLogger.debug("Found " +
+        str(len(existing_findings)) + " findings with same unique_id_from_tool")
+    for find in existing_findings:
+        if is_deduplication_on_engagement_mismatch(new_finding, find):
+            deduplicationLogger.debug(
+                'deduplication_on_engagement_mismatch, skipping dedupe.')
+            continue
+        set_duplicate(new_finding, find)
+        super(Finding, new_finding).save()
+        break
+
+
+def deduplicate_hash_code(new_finding):
+    if new_finding.test.engagement.deduplication_on_engagement:
+        existing_findings = Finding.objects.filter(
+            test__engagement=new_finding.test.engagement,
+            hash_code=new_finding.hash_code).exclude(
+                id=new_finding.id).exclude(
+                    hash_code=None).exclude(
+                        duplicate=True)
+    else:
+        existing_findings = Finding.objects.filter(
+            test__engagement__product=new_finding.test.engagement.product,
+            hash_code=new_finding.hash_code).exclude(
+                id=new_finding.id).exclude(
+                    hash_code=None).exclude(
+                        duplicate=True)
+    deduplicationLogger.debug("Found " +
+        str(len(existing_findings)) + " findings with same hash_code")
+    for find in existing_findings:
+        if is_deduplication_on_engagement_mismatch(new_finding, find):
+            deduplicationLogger.debug(
+                'deduplication_on_engagement_mismatch, skipping dedupe.')
+            continue
+        set_duplicate(new_finding, find)
+        super(Finding, new_finding).save()
+        break
+
+
+def deduplicate_uid_or_hash_code(new_finding):
+    if new_finding.test.engagement.deduplication_on_engagement:
+        existing_findings = Finding.objects.filter(
+            Q(hash_code=new_finding.hash_code) |
+            (Q(unique_id_from_tool=new_finding.unique_id_from_tool) & Q(test__test_type=new_finding.test.test_type)),
+            test__engagement=new_finding.test.engagement).exclude(
+                id=new_finding.id).exclude(
+                    hash_code=None).exclude(
+                        duplicate=True)
+    else:
+        existing_findings = Finding.objects.filter(
+            Q(hash_code=new_finding.hash_code) |
+            (Q(unique_id_from_tool=new_finding.unique_id_from_tool) & Q(test__test_type=new_finding.test.test_type)),
+            test__engagement__product=new_finding.test.engagement.product).exclude(
+                id=new_finding.id).exclude(
+                    hash_code=None).exclude(
+                        duplicate=True)
+    deduplicationLogger.debug("Found " +
+        str(len(existing_findings)) + " findings with either the same unique_id_from_tool or hash_code")
+    for find in existing_findings:
+        if is_deduplication_on_engagement_mismatch(new_finding, find):
+            deduplicationLogger.debug(
+                'deduplication_on_engagement_mismatch, skipping dedupe.')
+            continue
+        set_duplicate(new_finding, find)
+        super(Finding, new_finding).save()
+        break
+
+
+def set_duplicate(new_finding, existing_finding):
+    deduplicationLogger.debug('New finding ' + str(new_finding.id) + ' is a duplicate of existing finding ' + str(existing_finding.id))
+    new_finding.duplicate = True
+    new_finding.active = False
+    new_finding.verified = False
+    new_finding.duplicate_finding = existing_finding
+    existing_finding.duplicate_list.add(new_finding)
+    existing_finding.found_by.add(new_finding.test.test_type)
 
 
 def sync_rules(new_finding, *args, **kwargs):
@@ -470,7 +573,7 @@ def get_punchcard_data(findings, weeks_between, start_date):
                 pass
 
         if sum(days.values()) > 0:
-            for day, count in days.items():
+            for day, count in list(days.items()):
                 punchcard.append([tick, day, count])
                 if append_tick:
                     ticks.append([
@@ -816,7 +919,7 @@ class FileIterWrapper(object):
         self.flo = flo
         self.chunk_size = chunk_size
 
-    def next(self):
+    def __next__(self):
         data = self.flo.read(self.chunk_size)
         if data:
             return data
@@ -1006,7 +1109,11 @@ def log_jira_message(text, finding):
 def add_labels(find, issue):
     # Update Label with system setttings label
     system_settings = System_Settings.objects.get()
-    labels = system_settings.jira_labels.split()
+    labels = system_settings.jira_labels
+    if labels is None:
+        return
+    else:
+        labels = labels.split()
     if len(labels) > 0:
         for label in labels:
             issue.fields.labels.append(label)
@@ -1037,7 +1144,7 @@ def add_issue(find, push_to_jira):
     if push_to_jira:
         if 'Active' in find.status() and 'Verified' in find.status():
             if ((jpkey.push_all_issues and Finding.get_number_severity(
-                    System_Settings.objects.get().jira_minimum_severity) >
+                    System_Settings.objects.get().jira_minimum_severity) >=
                  Finding.get_number_severity(find.severity))):
                 log_jira_alert(
                     'Finding below jira_minimum_severity threshold.', find)
@@ -1079,6 +1186,9 @@ def add_issue(find, push_to_jira):
                     j_issue = JIRA_Issue(
                         jira_id=new_issue.id, jira_key=new_issue, finding=find)
                     j_issue.save()
+                    find.jira_creation = timezone.now()
+                    find.jira_change = find.jira_creation
+                    find.save()
                     issue = jira.issue(new_issue.id)
 
                     # Add labels (security & product)
@@ -1110,7 +1220,7 @@ def jira_attachment(jira, issue, file, jira_filename=None):
     if jira_check_attachment(issue, basename) is False:
         try:
             if jira_filename is not None:
-                attachment = StringIO.StringIO()
+                attachment = io.StringIO()
                 attachment.write(jira_filename)
                 jira.add_attachment(
                     issue=issue, attachment=attachment, filename=jira_filename)
@@ -1175,7 +1285,9 @@ def update_issue(find, old_status, push_to_jira):
                                                   jira_conf.finding_text),
                 priority={'name': jira_conf.get_priority(find.severity)},
                 fields=fields)
-
+            print('\n\nSaving jira_change\n\n')
+            find.jira_change = timezone.now()
+            find.save()
             # Add labels(security & product)
             add_labels(find, issue)
         except JIRAError as e:
@@ -1192,6 +1304,8 @@ def update_issue(find, old_status, push_to_jira):
                     url=req_url,
                     auth=HTTPBasicAuth(jira_conf.username, jira_conf.password),
                     json=json_data)
+                find.jira_change = timezone.now()
+                find.save()
         elif 'Active' in find.status() and 'Verified' in find.status():
             if 'Inactive' in old_status:
                 json_data = {'transition': {'id': jira_conf.open_status_key}}
@@ -1199,6 +1313,8 @@ def update_issue(find, old_status, push_to_jira):
                     url=req_url,
                     auth=HTTPBasicAuth(jira_conf.username, jira_conf.password),
                     json=json_data)
+                find.jira_change = timezone.now()
+                find.save()
 
 
 def close_epic(eng, push_to_jira):
@@ -1335,13 +1451,15 @@ def process_notifications(request, note, parent_url, parent_title):
         if User.objects.filter(is_active=True, username=username).exists()
     ]  # is_staff also?
     user_posting = request.user
-
+    if len(note.entry) > 200:
+        note.entry = note.entry[:200]
+        note.entry += "..."
     create_notification(
         event='user_mentioned',
         section=parent_title,
         note=note,
         user=request.user,
-        title='%s mentioned you in a note' % request.user,
+        title='%s jotted a note' % request.user,
         url=parent_url,
         icon='commenting',
         recipients=users_to_notify)
@@ -1366,17 +1484,21 @@ def send_atmention_email(user, users, parent_url, parent_title, new_note):
 def encrypt(key, iv, plaintext):
     text = ""
     if plaintext and plaintext is not None:
-        aes = AES.new(key, AES.MODE_CBC, iv, segment_size=128)
+        backend = default_backend()
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=backend)
+        encryptor = cipher.encryptor()
         plaintext = _pad_string(plaintext)
-        encrypted_text = aes.encrypt(plaintext)
+        encrypted_text = encryptor.update(plaintext) + encryptor.finalize()
         text = binascii.b2a_hex(encrypted_text).rstrip()
     return text
 
 
 def decrypt(key, iv, encrypted_text):
-    aes = AES.new(key, AES.MODE_CBC, iv, segment_size=128)
+    backend = default_backend()
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=backend)
     encrypted_text_bytes = binascii.a2b_hex(encrypted_text)
-    decrypted_text = aes.decrypt(encrypted_text_bytes)
+    decryptor = cipher.decryptor()
+    decrypted_text = decryptor.update(encrypted_text_bytes) + decryptor.finalize()
     decrypted_text = _unpad_string(decrypted_text)
     return decrypted_text
 
@@ -1384,13 +1506,12 @@ def decrypt(key, iv, encrypted_text):
 def _pad_string(value):
     length = len(value)
     pad_size = 16 - (length % 16)
-    return value.ljust(length + pad_size, '\x00')
+    return value.ljust(length + pad_size, b'\x00')
 
 
 def _unpad_string(value):
     if value and value is not None:
-        while value[-1] == '\x00':
-            value = value[:-1]
+        value = value.rstrip(b'\x00')
     return value
 
 
@@ -1402,7 +1523,7 @@ def dojo_crypto_encrypt(plaintext):
 
         iv = os.urandom(16)
         data = prepare_for_save(
-            iv, encrypt(key, iv, plaintext.encode('ascii', 'ignore')))
+            iv, encrypt(key, iv, plaintext.encode('utf-8')))
 
     return data
 
@@ -1412,7 +1533,7 @@ def prepare_for_save(iv, encrypted_value):
 
     if encrypted_value and encrypted_value is not None:
         binascii.b2a_hex(encrypted_value).rstrip()
-        stored_value = "AES.1:" + binascii.b2a_hex(iv) + ":" + encrypted_value
+        stored_value = "AES.1:" + binascii.b2a_hex(iv).decode('utf-8') + ":" + encrypted_value.decode('utf-8')
     return stored_value
 
 
@@ -1421,7 +1542,7 @@ def get_db_key():
     if hasattr(settings, 'DB_KEY'):
         db_key = settings.DB_KEY
         db_key = binascii.b2a_hex(
-            hashlib.sha256(db_key).digest().rstrip())[:32]
+            hashlib.sha256(db_key.encode('utf-8')).digest().rstrip())[:32]
 
     return db_key
 
@@ -1442,7 +1563,7 @@ def prepare_for_view(encrypted_value):
 
             try:
                 decrypted_value = decrypt(key, iv, value)
-                decrypted_value.decode('ascii')
+                decrypted_value = decrypted_value.decode('utf-8')
             except UnicodeDecodeError:
                 decrypted_value = ""
 
@@ -1480,13 +1601,20 @@ def get_slack_user_id(user_email):
 
 
 def create_notification(event=None, **kwargs):
+    def create_description(event):
+        if "description" not in kwargs.keys():
+            if event == 'product_added':
+                kwargs["description"] = "Product " + kwargs['title'] + " has been created successfully."
+            else:
+                kwargs["description"] = "Event " + str(event) + " has occured."
+
     def create_notification_message(event, notification_type):
         template = 'notifications/%s.tpl' % event.replace('/', '')
         kwargs.update({'type': notification_type})
-
         try:
             notification = render_to_string(template, kwargs)
         except:
+            create_description(event)
             notification = render_to_string('notifications/other.tpl', kwargs)
 
         return notification
@@ -1580,7 +1708,7 @@ def create_notification(event=None, **kwargs):
         send_hipchat_notification(get_system_setting('hipchat_channel'))
 
     if mail_enabled and 'mail' in getattr(notifications, event):
-        send_slack_notification(get_system_setting('mail_notifications_from'))
+        send_mail_notification(get_system_setting('mail_notifications_to'))
 
     if 'alert' in getattr(notifications, event, None):
         send_alert_notification()
@@ -1653,7 +1781,7 @@ def calculate_grade(product):
 
 
 def get_celery_worker_status():
-    from tasks import celery_status
+    from .tasks import celery_status
     res = celery_status.apply_async()
 
     # Wait 15 seconds for a response from Celery
@@ -1769,5 +1897,7 @@ def apply_cwe_to_template(finding, override=False):
             finding.mitigation = template.mitigation
             finding.impact = template.impact
             finding.references = template.references
+            template.last_used = timezone.now()
+            template.save()
 
     return finding

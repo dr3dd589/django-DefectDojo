@@ -25,7 +25,7 @@ class SpotbugsXMLParser(object):
         root = tree.getroot()
 
         for pattern in root.findall('BugPattern'):
-            plain_pattern = re.sub(r'<[b-z/]*?>|<a|</a>|href=', '', ET.tostring(pattern.find('Details'), method='text'))
+            plain_pattern = re.sub(r'<[b-z/]*?>|<a|</a>|href=', '', ET.tostring(pattern.find('Details'), method='text').decode('utf-8'))
             bug_patterns[pattern.get('type')] = plain_pattern
 
         for bug in root.findall('BugInstance'):
@@ -62,4 +62,4 @@ class SpotbugsXMLParser(object):
                 )
                 dupes[dupe_key] = finding
 
-        self.items = dupes.values()
+        self.items = list(dupes.values())

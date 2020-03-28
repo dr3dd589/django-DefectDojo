@@ -5,11 +5,17 @@ from dojo.models import Finding
 
 class PhpSecurityAuditV2(object):
     def __init__(self, filename, test):
-        data = json.load(filename)
+        tree = filename.read()
+        try:
+            data = json.loads(str(tree, 'utf-8'))
+        except:
+            data = json.loads(tree)
         dupes = dict()
 
-        for filepath, report in data["files"].items():
-            if report["errors"] > 0:
+        for filepath, report in list(data["files"].items()):
+            errors = report.get("errors") or 0
+            warns = report.get("warnings") or 0
+            if errors + warns > 0:
                 for issue in report["messages"]:
                     title = issue["source"]
 
@@ -45,7 +51,7 @@ class PhpSecurityAuditV2(object):
                         dupes[dupe_key] = find
                         findingdetail = ''
 
-        self.items = dupes.values()
+        self.items = list(dupes.values())
 
     @staticmethod
     def get_severity_word(severity):

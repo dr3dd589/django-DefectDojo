@@ -1,6 +1,6 @@
 # see tastypie documentation at http://django-tastypie.readthedocs.org/en
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.core.urlresolvers import resolve, get_script_prefix
+from django.urls import resolve, get_script_prefix
 from tastypie import fields
 from tastypie.fields import RelatedField
 from tastypie.authentication import ApiKeyAuthentication
@@ -15,7 +15,6 @@ from tastypie.validation import FormValidation, Validation
 from django.urls.exceptions import Resolver404
 from django.utils import timezone
 
-
 from dojo.models import Product, Engagement, Test, Finding, \
     User, ScanSettings, IPScan, Scan, Stub_Finding, Risk_Acceptance, \
     Finding_Template, Test_Type, Development_Environment, \
@@ -28,9 +27,10 @@ from dojo.forms import ProductForm, EngForm, TestForm, \
     JIRA_IssueForm, ToolConfigForm, ToolProductSettingsForm, \
     ToolTypeForm, LanguagesTypeForm, Languages_TypeTypeForm, App_AnalysisTypeForm, \
     Development_EnvironmentForm, Product_TypeForm, Test_TypeForm
+from dojo.tools import requires_file
 from dojo.tools.factory import import_parser_factory
 from datetime import datetime
-from object.parser import import_object_eng
+from .object.parser import import_object_eng
 
 """
     Setup logging for the api
@@ -73,7 +73,7 @@ class ModelFormValidation(FormValidation):
         rsc = self.resource()
         kwargs = super(ModelFormValidation, self).form_args(bundle)
 
-        for name, rel_field in rsc.fields.items():
+        for name, rel_field in list(rsc.fields.items()):
             data = kwargs['data']
             if not issubclass(rel_field.__class__, RelatedField):
                 continue  # Not a resource field
@@ -537,6 +537,8 @@ class EngagementResource(BaseModelResource):
             'pen_test': ALL,
             'status': ALL,
             'product': ALL,
+            'name': ALL,
+            'product_id': ALL,
         }
         authentication = DojoApiKeyAuthentication()
         authorization = DjangoAuthorization()
@@ -914,6 +916,8 @@ class TestTypeResource(BaseModelResource):
         filtering = {
             'id': ALL,
             'name': ALL,
+            'title': ALL,
+            'engagement': ALL,
         }
         authentication = DojoApiKeyAuthentication()
         authorization = DjangoAuthorization()
@@ -950,6 +954,7 @@ class TestResource(BaseModelResource):
         include_resource_uri = True
         filtering = {
             'id': ALL,
+            'title': ALL,
             'test_type': ALL,
             'target_start': ALL,
             'target_end': ALL,
@@ -1295,7 +1300,7 @@ class ImportScanValidation(Validation):
         errors = {}
 
         # Make sure file is present
-        if 'file' not in bundle.data:
+        if 'file' not in bundle.data and requires_file(bundle.data.get('scan_type')):
             errors.setdefault('file', []).append('You must pass a file in to be imported')
 
         # Make sure scan_date matches required format
@@ -1314,7 +1319,7 @@ class ImportScanValidation(Validation):
                 get_pk_from_uri(uri=bundle.data['engagement'])
             except NotFound:
                 errors.setdefault('engagement', []).append('A valid engagement must be supplied. Ex. /api/v1/engagements/1/')
-        scan_type_list = list(map(lambda x: x[0], ImportScanForm.SCAN_TYPE_CHOICES))
+        scan_type_list = list([x[0] for x in ImportScanForm.SCAN_TYPE_CHOICES])
         if 'scan_type' in bundle.data:
             if bundle.data['scan_type'] not in scan_type_list:
                 errors.setdefault('scan_type', []).append('scan_type must be one of the following: ' + ', '.join(scan_type_list))
@@ -1329,7 +1334,7 @@ class ImportScanValidation(Validation):
             errors.setdefault('test_type', []).append(
                 'test_type must be one of the following: ' +
                 ', '.join(Test_Type.objects.values_list("name", flat=True)))
-        severity_list = list(map(lambda x: x[0], SEVERITY_CHOICES))
+        severity_list = list([x[0] for x in SEVERITY_CHOICES])
         if 'minimum_severity' in bundle.data:
             if bundle.data['minimum_severity'] not in severity_list:
                 errors.setdefault('minimum_severity', []).append('minimum_severity must be one of the following: ' + ', '.join(severity_list))
@@ -1457,14 +1462,15 @@ class ImportScanResource(MultipartResource, Resource):
         try:
             t.full_clean()
         except ValidationError as e:
-            print "Error Validating Test Object"
-            print e
+            print("Error Validating Test Object")
+            print(e)
 
         t.save()
         t.tags = bundle.data['tags']
 
         try:
-            parser = import_parser_factory(bundle.data['file'], t, bundle.data['scan_type'])
+            parser = import_parser_factory(bundle.data.get('file'), t, bundle.data['active'], bundle.data['verified'],
+                                           bundle.data['scan_type'])
         except ValueError:
             raise NotFound("Parser ValueError")
 
@@ -1536,8 +1542,8 @@ class ReImportScanValidation(Validation):
 
         errors = {}
 
-        # Make sure file is present
-        if 'file' not in bundle.data:
+        # Make sure file is present if scanner requires a file
+        if 'file' not in bundle.data and requires_file(bundle.data['scan_type']):
             errors.setdefault('file', []).append('You must pass a file in to be imported')
 
         # Make sure scan_date matches required format
@@ -1556,13 +1562,13 @@ class ReImportScanValidation(Validation):
                 get_pk_from_uri(uri=bundle.data['test'])
             except NotFound:
                 errors.setdefault('test', []).append('A valid test must be supplied. Ex. /api/v1/tests/1/')
-        scan_type_list = list(map(lambda x: x[0], ImportScanForm.SCAN_TYPE_CHOICES))
+        scan_type_list = list([x[0] for x in ImportScanForm.SCAN_TYPE_CHOICES])
         if 'scan_type' in bundle.data:
             if bundle.data['scan_type'] not in scan_type_list:
                 errors.setdefault('scan_type', []).append('scan_type must be one of the following: ' + ', '.join(scan_type_list))
         else:
             errors.setdefault('scan_type', []).append('A scan_type must be given so we know how to import the scan file.')
-        severity_list = list(map(lambda x: x[0], SEVERITY_CHOICES))
+        severity_list = list([x[0] for x in SEVERITY_CHOICES])
         if 'minimum_severity' in bundle.data:
             if bundle.data['minimum_severity'] not in severity_list:
                 errors.setdefault('minimum_severity', []).append('minimum_severity must be one of the following: ' + ', '.join(severity_list))
@@ -1646,7 +1652,7 @@ class ReImportScanResource(MultipartResource, Resource):
         active = bundle.obj.__getattr__('active')
 
         try:
-            parser = import_parser_factory(bundle.data['file'], test, scan_type)
+            parser = import_parser_factory(bundle.data.get('file'), test, active, verified, scan_type)
         except ValueError:
             raise NotFound("Parser ValueError")
 
@@ -1703,7 +1709,7 @@ class ReImportScanResource(MultipartResource, Resource):
                     item.last_reviewed_by = bundle.request.user
                     item.verified = verified
                     item.active = active
-                    item.save()
+                    item.save(dedupe_option=False)
                     finding_added_count += 1
                     new_items.append(item.id)
                     find = item
@@ -1737,6 +1743,7 @@ class ReImportScanResource(MultipartResource, Resource):
 
                     if item.unsaved_tags is not None:
                         find.tags = item.unsaved_tags
+                find.save()
             # calculate the difference
             to_mitigate = set(original_items) - set(new_items)
             for finding_id in to_mitigate:
